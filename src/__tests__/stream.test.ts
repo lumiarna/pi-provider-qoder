@@ -312,6 +312,64 @@ describe("streamQoder", () => {
     expect(events.find((e) => e.type === "done")).toBeUndefined();
   });
 
+  it("completes a reply whose body ends with the finish chunk and no [DONE]", async () => {
+    // The `smodel` (Sonus) route never sends the [DONE] envelope: verified live
+    // against api3.qoder.sh, its body ends with the finish chunk, then
+    // `event:finish` and a clean close. Treating the missing sentinel as a
+    // disconnect failed every reply on that route.
+    const sse = sseEnvelope(chunk({ content: "pong", role: "assistant" })) + sseEnvelope(finishChunk("stop"));
+    globalThis.fetch = mockFetch(sse);
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    expect(events.find((e) => e.type === "error")).toBeUndefined();
+    const done = events.find((e) => e.type === "done") as { message: AssistantMessage; reason: string };
+    expect(done.reason).toBe("stop");
+    expect(done.message.content).toEqual([{ type: "text", text: "pong" }]);
+  });
+
+  it("finalizes a tool call whose body ends with the finish chunk and no [DONE]", async () => {
+    // Same smodel shape as above, but the reply is a tool call: throwing before
+    // the finalizer left the block with `arguments: {}`, discarding a call the
+    // model had already sent in full. `function_call` is the real finish_reason
+    // this route reports for tool calls.
+    const sse =
+      sseEnvelope(
+        chunk({
+          role: "assistant",
+          tool_calls: [{ index: 0, id: "fc_1", function: { name: "read" } }],
+        }),
+      ) +
+      sseEnvelope(chunk({ tool_calls: [{ index: 0, function: { arguments: '{"path":"package' } }] })) +
+      sseEnvelope(chunk({ tool_calls: [{ index: 0, function: { arguments: '.json"}' } }] })) +
+      sseEnvelope(finishChunk("function_call"));
+    globalThis.fetch = mockFetch(sse);
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    expect(events.find((e) => e.type === "error")).toBeUndefined();
+    const done = events.find((e) => e.type === "done") as { message: AssistantMessage; reason: string };
+    expect(done.reason).toBe("toolUse");
+    expect(done.message.content).toEqual([
+      { type: "toolCall", id: "fc_1", name: "read", arguments: { path: "package.json" } },
+    ]);
+  });
+
+  it("never emits an out-of-union stopReason for Qoder's tool-call finish_reason", async () => {
+    // Qoder finishes tool calls with "function_call", which is not a pi stop
+    // reason. It must not leak into the message or the done event; the upstream
+    // value is kept in rawStopReason instead. A finish_reason without a parsable
+    // tool call must not claim "toolUse" either — that is the silent dead end
+    // the finalizer guard exists to prevent.
+    const sse = sseEnvelope(chunk({ content: "done", role: "assistant" })) + sseEnvelope(finishChunk("function_call"));
+    globalThis.fetch = mockFetch(sse);
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    expect(events.find((e) => e.type === "error")).toBeUndefined();
+    const done = events.find((e) => e.type === "done") as { message: AssistantMessage; reason: string };
+    expect(done.reason).toBe("stop");
+    expect(done.message.stopReason).toBe("stop");
+    expect(done.message.rawStopReason).toBe("function_call");
+  });
+
   it("preserves finish_reason=length instead of overwriting to stop", async () => {
     const sse =
       sseEnvelope(chunk({ content: "partial", role: "assistant" })) + sseEnvelope(finishChunk("length")) + DONE_SSE;

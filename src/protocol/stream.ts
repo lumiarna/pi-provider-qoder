@@ -575,6 +575,14 @@ export function streamQoder(
       // already been streamed by then, so the agent looked stuck with no error.
       let sawDone = false;
 
+      // The [DONE] envelope is not sent by every route: verified live against
+      // api3.qoder.sh, `smodel` (Sonus) ends its body with `event:finish` and a
+      // clean close and never sends [DONE], while every other route sends it
+      // right before `event:finish`. The upstream "generation is over" signal
+      // that IS universal is the finish chunk (finish_reason and/or usage), so
+      // use it to tell a completed reply from a body that was really cut short.
+      let sawFinishChunk = false;
+
       while (!sawDone) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -627,6 +635,9 @@ export function streamQoder(
             // separately for diagnostics without changing assistant identity.
             if (inner.model) output.responseModel = inner.model as string;
             if (inner.usage) {
+              // Usage arrives only on the final chunk, together with
+              // finish_reason (verified live on every route).
+              sawFinishChunk = true;
               const u = inner.usage as {
                 prompt_tokens?: number;
                 completion_tokens?: number;
@@ -807,9 +818,20 @@ export function streamQoder(
               }
 
               if (choice.finish_reason) {
-                // Preserve the real upstream finish_reason (e.g. "length",
-                // "content_filter") instead of forcing "stop" later.
-                output.stopReason = choice.finish_reason as AssistantMessage["stopReason"];
+                sawFinishChunk = true;
+                // Keep the upstream value verbatim the way pi-ai's own providers
+                // do (`rawStopReason`), and keep stopReason inside pi's union.
+                // "length" must survive; Qoder's "function_call" (smodel
+                // route) and "tool_calls" are NOT pi stop reasons, so they
+                // deliberately fall through to the finalizer below, which claims
+                // "toolUse" only once a call actually reached the message. Any
+                // other unrecognised value stays "stop": an out-of-union
+                // stopReason would otherwise be written back into the session
+                // and carried by the done event.
+                output.rawStopReason = choice.finish_reason;
+                if (choice.finish_reason === "length") {
+                  output.stopReason = "length";
+                }
               }
             }
           } catch (e) {
@@ -832,9 +854,20 @@ export function streamQoder(
       await reader.cancel().catch(() => {});
 
       if (!sawDone) {
-        throw new Error(
-          `Qoder stream disconnected prematurely (connection closed before [DONE] after ${output.usage.output || 0} output tokens)`,
-        );
+        // A reply that reached its finish chunk is complete even without the
+        // sentinel — throwing here discarded the parsed tool call (its
+        // arguments are only assigned by the finalizer below) and reported a
+        // failure for a fully generated turn on every Sonus request.
+        if (!sawFinishChunk) {
+          throw new Error(
+            `Qoder stream disconnected prematurely (connection closed before [DONE] after ${output.usage.output || 0} output tokens)`,
+          );
+        }
+        if (process.env.QODER_DEBUG) {
+          console.error(
+            "[pi-provider-qoder] stream ended without the [DONE] envelope after the finish chunk; treating as complete",
+          );
+        }
       }
 
       if (thinkingParser) {
