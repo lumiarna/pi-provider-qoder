@@ -703,4 +703,68 @@ describe("streamQoder", () => {
     const text = msg.content.find((c) => c.type === "text") as { text: string } | undefined;
     expect(text?.text).toBe("Let me read the file.");
   });
+
+  const leakedMarkupReplies = [
+    ["a bare <parameter> opener", '<parameter name="bash">'],
+    ["a bare </parameter> closer", "</parameter>"],
+    ["a bare DSML closer", "</｜｜DSML｜｜ calls>"],
+    ["an opener cut off after some text", 'Inspecting the file now.\n<parameter name="bash">'],
+  ] as const;
+
+  it.each(leakedMarkupReplies)("turns leaked tool markup (%s) into a retryable error", async (_label, content) => {
+    const sse = sseEnvelope(chunk({ content, role: "assistant" })) + sseEnvelope(finishChunk("stop")) + DONE_SSE;
+    globalThis.fetch = mockFetch(sse);
+    const stream = streamQoder(makeModel(), makeContext(), { apiKey: "fake" });
+    const events = await consume(stream);
+
+    const err = events.find((e) => e.type === "error") as { error: AssistantMessage } | undefined;
+    expect(err, "expected an error event").toBeDefined();
+    expect(err?.error.stopReason).toBe("error");
+    expect(err?.error.errorMessage).toMatch(/^Qoder provider returned error: malformed tool call leaked/);
+    expect(events.find((e) => e.type === "done")).toBeUndefined();
+  });
+
+  const thinkingOnlyReplies = [
+    ["reasoning with no answer text", "thinking about the next step..."],
+    ["reasoning ending in a leaked DSML marker", "checking the loader\n\n</｜｜DSML｜｜ calls>"],
+  ] as const;
+
+  it.each(thinkingOnlyReplies)("turns a thinking-only reply (%s) into a retryable error", async (_label, reasoning) => {
+    const sse =
+      sseEnvelope(chunk({ reasoning_content: reasoning, role: "assistant" })) +
+      sseEnvelope(finishChunk("stop")) +
+      DONE_SSE;
+    globalThis.fetch = mockFetch(sse);
+    const stream = streamQoder(makeModel(), makeContext(), {
+      apiKey: "fake",
+      reasoning: "high",
+    });
+    const events = await consume(stream);
+
+    const err = events.find((e) => e.type === "error") as { error: AssistantMessage } | undefined;
+    expect(err, "expected an error event").toBeDefined();
+    expect(err?.error.stopReason).toBe("error");
+    expect(err?.error.errorMessage).toMatch(/^Qoder provider returned error: empty assistant response/);
+    expect(events.find((e) => e.type === "done")).toBeUndefined();
+  });
+
+  const validMarkupMentions = [
+    [
+      "a sentence explaining a parameter tag",
+      'You can specify parameters like <parameter name="file">path</parameter> in the doc.',
+    ],
+    ["a fenced XML code block", '```xml\n<parameter name="bash">ls</parameter>\n```'],
+  ] as const;
+
+  it.each(validMarkupMentions)("keeps %s as a normal stop reply", async (_label, content) => {
+    const sse = sseEnvelope(chunk({ content, role: "assistant" })) + sseEnvelope(finishChunk("stop")) + DONE_SSE;
+    globalThis.fetch = mockFetch(sse);
+    const stream = streamQoder(makeModel(), makeContext(), { apiKey: "fake" });
+    const events = await consume(stream);
+
+    expect(events.find((e) => e.type === "error")).toBeUndefined();
+    const done = events.find((e) => e.type === "done") as { message: AssistantMessage; reason: string };
+    expect(done.reason).toBe("stop");
+    expect(done.message.stopReason).toBe("stop");
+  });
 });

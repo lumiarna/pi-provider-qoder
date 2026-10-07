@@ -61,6 +61,10 @@ pi --provider qoder-cn --model Qwen3.7-Plus
 /login qoder-cn-2
 ```
 
+### 调试
+
+设置环境变量 `QODER_DEBUG=1` 可开启调试日志（输出到 stderr，同时追加写入日志文件，默认 `${tmpdir()}/qoder-debug.log`）。可用 `QODER_DEBUG_FILE=/path/to/log` 覆盖日志文件路径。日志包含排队重试、被跳过的异常 SSE 行、未识别的 delta 字段，以及触发重试的错误原因。
+
 ## 服务端点
 
 | 端点类型 | 国际版 (`qoder`) | 中国版 (`qoder-cn`) |

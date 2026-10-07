@@ -36,9 +36,10 @@ export function parseToolCallsFromText(text: string): {
         }
       } catch {}
     } else {
-      const funcMatch = /<function(?:\s+name=|=|\s+)["']?([a-zA-Z0-9_\-]+)["']?>([\s\S]*?)(?:<\/function>|$)/i.exec(
-        rawContent,
-      );
+      const funcMatch =
+        /<(?:function|invoke)(?:\s+name=|=|\s+)["']?([a-zA-Z0-9_-]+)["']?>([\s\S]*?)(?:<\/(?:function|invoke)>|$)/i.exec(
+          rawContent,
+        );
       if (funcMatch) {
         name = funcMatch[1];
         const paramsBlock = funcMatch[2];

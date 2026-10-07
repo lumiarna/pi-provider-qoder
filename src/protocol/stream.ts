@@ -1,4 +1,7 @@
 import crypto from "node:crypto";
+import { appendFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import * as PiAi from "@earendil-works/pi-ai";
 import {
   type Api,
@@ -17,8 +20,8 @@ import {
   buildThinkingLevelMap,
   checkAccountEntitlement,
   getCachedModelConfig,
-  resolveModelConfig,
   MAX_OUTPUT_TOKENS,
+  resolveModelConfig,
 } from "../catalog.js";
 import { buildAuthHeaders, getMachineId } from "../cosy.js";
 import { getQoderChatURL, getQoderRegionConfig } from "../region.js";
@@ -26,6 +29,42 @@ import { qoderEncodeBody } from "./encoding.js";
 import { stripThinkingTags, ThinkingTagParser } from "./thinking.js";
 import { parseToolCallsFromText } from "./tool-parser.js";
 import { extractTools, transformMessagesForQoder, transformTools } from "./transform.js";
+
+function debugLog(...args: unknown[]): void {
+  if (!process.env.QODER_DEBUG) return;
+  const line = `[pi-provider-qoder] ${new Date().toISOString()} ${args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ")}\n`;
+  try {
+    const logPath = process.env.QODER_DEBUG_FILE || join(tmpdir(), "qoder-debug.log");
+    appendFileSync(logPath, line, "utf8");
+  } catch {}
+  console.error("[pi-provider-qoder]", ...args);
+}
+
+/** Tool-calling markup that leaked into text instead of `tool_calls`: DeepSeek
+ * DSML delimiters (`<｜DSML｜tool_calls>`) and bare XML tags (`<parameter ...>`). */
+const TOOL_MARKUP_TAG_REGEX = /<(?:\/?(?:parameter|tool_calls?|function|invoke)\b|\/?\s*[|｜]{1,2}\s*DSML)/i;
+
+const DANGLING_OPENER_REGEX = /<(?:parameter|tool_calls?|function|invoke)\b[^>]*>$/i;
+
+/** Detects leaked tool-calling markup in a reply that produced no tool call. */
+function detectMalformedToolCallLeak(text: string): string | null {
+  const trimmedText = text.trim();
+
+  // Nothing but markup: the reply carries no user-facing content.
+  if (trimmedText.length > 0 && TOOL_MARKUP_TAG_REGEX.test(trimmedText)) {
+    const stripped = trimmedText.replace(/<[^>]+>/g, "").trim();
+    if (stripped.length === 0) {
+      return "bare tool call markup leaked into reply without content";
+    }
+  }
+
+  // A call cut off mid-argument: the opener never closes.
+  if (trimmedText.length > 0 && DANGLING_OPENER_REGEX.test(text.trimEnd())) {
+    return "dangling tool call opener at end of text reply";
+  }
+
+  return null;
+}
 
 interface ToolCallState {
   arguments: string;
@@ -236,8 +275,8 @@ async function fetchWithQueueRetry(url: string, init: RequestInit, signal?: Abor
     }
 
     if (process.env.QODER_DEBUG) {
-      console.error(
-        `[pi-provider-qoder] Qoder queue busy (10605), retrying in ${inspected.queue.retryAfterSeconds}s (${attempt + 1}/${MAX_QUEUE_RETRIES})`,
+      debugLog(
+        `Qoder queue busy (10605), retrying in ${inspected.queue.retryAfterSeconds}s (${attempt + 1}/${MAX_QUEUE_RETRIES})`,
       );
     }
     await waitForQueueRetry(inspected.queue.retryAfterSeconds, signal);
@@ -674,6 +713,14 @@ export function streamQoder(
               const delta = choice.delta;
 
               if (delta) {
+                if (process.env.QODER_DEBUG) {
+                  const recognized = new Set(["content", "reasoning_content", "tool_calls", "role"]);
+                  const unknownKeys = Object.keys(delta).filter((k) => !recognized.has(k));
+                  if (unknownKeys.length > 0) {
+                    debugLog("unrecognized delta keys:", unknownKeys, "delta:", delta);
+                  }
+                }
+
                 // 1. Process reasoning/thinking content (API reasoning)
                 if (delta.reasoning_content) {
                   // Qoder's backend sometimes routes a literal `<thinking>`
@@ -818,7 +865,7 @@ export function streamQoder(
             // outer catch and surface as stopReason="error", not be swallowed.
             if (e instanceof SyntaxError) {
               if (process.env.QODER_DEBUG) {
-                console.error("[pi-provider-qoder] skipping malformed SSE line:", dataStr.slice(0, 200));
+                debugLog("skipping malformed SSE line:", dataStr.slice(0, 200));
               }
               continue;
             }
@@ -926,6 +973,29 @@ export function streamQoder(
       if (toolCallsState.some((state) => state?.emittedStart)) {
         if (output.stopReason !== "length") {
           output.stopReason = "toolUse";
+        }
+      } else {
+        // No tool call reached the message: a stop carrying neither text nor a
+        // tool call (a real DeepSeek-Flash failure mode), or markup the gateway
+        // failed to parse and leaked as text, is a broken turn. The "provider
+        // returned error" wording is what makes pi's retry policy regenerate it
+        // instead of the turn ending as a silent stop.
+        const textBlocks = output.content.filter((b): b is TextContent => b.type === "text");
+        const fullText = textBlocks.map((b) => b.text).join("");
+        const hasNonEmptyText = fullText.trim().length > 0;
+        const modelName = output.responseModel || effectiveModel.id;
+
+        if (!hasNonEmptyText && output.stopReason === "stop") {
+          const errMsg = `Qoder provider returned error: empty assistant response without text or tool calls (${modelName})`;
+          debugLog(errMsg);
+          throw new Error(errMsg);
+        }
+
+        const leakReason = detectMalformedToolCallLeak(fullText);
+        if (leakReason) {
+          const errMsg = `Qoder provider returned error: malformed tool call leaked into reply (${leakReason}, ${modelName})`;
+          debugLog(errMsg);
+          throw new Error(errMsg);
         }
       }
       // Otherwise keep whatever finish_reason set upstream (defaults to "stop").
