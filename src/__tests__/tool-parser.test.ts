@@ -66,6 +66,20 @@ echo "hello world"
     });
   });
 
+  it("parses <invoke> style XML tool calls", () => {
+    const text = `<tool_call>
+<invoke name="bash">
+<parameter name="command">echo hi</parameter>
+</invoke>
+</tool_call>`;
+
+    const { cleanText, toolCalls } = parseToolCallsFromText(text);
+    expect(cleanText).toBe("");
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls[0].name).toBe("bash");
+    expect(toolCalls[0].arguments.command).toBe("echo hi");
+  });
+
   it('parses XML style with name="..." attributes', () => {
     const text = `<tool_call>
 <function name="read">
