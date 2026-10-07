@@ -911,9 +911,7 @@ export function streamQoder(
           );
         }
         if (process.env.QODER_DEBUG) {
-          console.error(
-            "[pi-provider-qoder] stream ended without the [DONE] envelope after the finish chunk; treating as complete",
-          );
+          debugLog("stream ended without the [DONE] envelope after the finish chunk; treating as complete");
         }
       }
 
