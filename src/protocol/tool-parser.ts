@@ -10,8 +10,7 @@ export function parseToolCallsFromText(text: string): {
   const toolCallRegex = /<tool_call>([\s\S]*?)<\/tool_call>/gi;
   const toolCalls: ParsedToolCall[] = [];
 
-  let match: RegExpExecArray | null;
-  while ((match = toolCallRegex.exec(text)) !== null) {
+  for (let match = toolCallRegex.exec(text); match !== null; match = toolCallRegex.exec(text)) {
     let rawContent = match[1].trim();
     let name = "";
     let args: Record<string, any> = {};
@@ -43,9 +42,8 @@ export function parseToolCallsFromText(text: string): {
       if (funcMatch) {
         name = funcMatch[1];
         const paramsBlock = funcMatch[2];
-        const paramRegex = /<parameter(?:\s+name=|=|\s+)["']?([a-zA-Z0-9_\-]+)["']?>([\s\S]*?)<\/parameter>/gi;
-        let pMatch: RegExpExecArray | null;
-        while ((pMatch = paramRegex.exec(paramsBlock)) !== null) {
+        const paramRegex = /<parameter(?:\s+name=|=|\s+)["']?([a-zA-Z0-9_-]+)["']?>([\s\S]*?)<\/parameter>/gi;
+        for (let pMatch = paramRegex.exec(paramsBlock); pMatch !== null; pMatch = paramRegex.exec(paramsBlock)) {
           const pName = pMatch[1];
           let pVal: any = pMatch[2].trim();
           if ((pVal.startsWith("{") && pVal.endsWith("}")) || (pVal.startsWith("[") && pVal.endsWith("]"))) {
