@@ -109,8 +109,6 @@ function registerQoderProvider(
   });
 }
 
-
-
 /**
  * Refresh the catalogue of every Qoder account known for a region.
  *
